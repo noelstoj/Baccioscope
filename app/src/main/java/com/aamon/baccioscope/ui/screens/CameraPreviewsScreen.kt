@@ -1,6 +1,6 @@
 package com.aamon.baccioscope.ui.screens
 
-import androidx.compose.foundation.Image // <-- ADD THIS IMPORT
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -21,6 +22,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -33,7 +35,10 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
-import com.aamon.baccioscope.R // Ensure this matches your package name for R.drawable
+import com.google.gson.annotations.SerializedName
+import com.aamon.baccioscope.R
+import com.aamon.baccioscope.ui.theme.BinkFamily
+import com.aamon.baccioscope.ui.theme.handWriting
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -45,7 +50,6 @@ import kotlinx.coroutines.launch
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
-import com.google.gson.annotations.SerializedName
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.cos
@@ -70,17 +74,24 @@ data class PreviewFile(
     @SerializedName("download_url") val downloadUrl: String
 )
 
-// Fleet member data from the provided JSON
 data class FleetMember(
     @SerializedName("Name") val name: String,
     @SerializedName("AKA") val aka: String?,
-    @SerializedName("Lat") val lat: String, // Arrives as a string
-    @SerializedName("Lon") val lon: String  // Arrives as a string
+    @SerializedName("Lat") val lat: String,
+    @SerializedName("Lon") val lon: String
+)
+
+data class NomarchStatusResponse(
+    val date: String,
+    @SerializedName("average_files") val averageFiles: Double,
+    val devices: List<NomarchDeviceStatus>
 )
 
 data class NomarchDeviceStatus(
-    @SerializedName("device_id") val deviceId: String,
-    val status: String
+    val name: String,
+    @SerializedName("pi_to_server_status") val piToServerStatus: String,
+    @SerializedName("server_to_archive_status") val serverToArchiveStatus: String,
+    @SerializedName("is_low_count_anomaly") val isLowCountAnomaly: Boolean
 )
 
 interface BaccioscopeApi {
@@ -88,7 +99,7 @@ interface BaccioscopeApi {
     suspend fun getPreviewsStatus(): PreviewsStatusResponse
 
     @GET("api/v1/nomarch/status")
-    suspend fun getNomarchStatus(): List<NomarchDeviceStatus>
+    suspend fun getNomarchStatus(): NomarchStatusResponse
 
     @GET("api/v1/fleetmembers")
     suspend fun getFleetMembers(): List<FleetMember>
@@ -107,7 +118,7 @@ interface BaccioscopeApi {
 }
 
 // ============================================================================
-// 2. VIEW MODEL (State & Chaos Management)
+// 2. VIEW MODEL
 // ============================================================================
 
 data class CameraUiModel(
@@ -118,8 +129,10 @@ data class CameraUiModel(
     val latestDateString: String?,
     val midnightDateString: String?,
     val imagePrefix: String,
-    val xPercent: Float, // Calculated relative position on map (0.0 to 1.0)
-    val yPercent: Float
+    val xPercent: Float,
+    val yPercent: Float,
+    val clusterIndex: Int = 0,
+    val clusterCount: Int = 1
 )
 
 sealed class PreviewsUiState {
@@ -134,11 +147,14 @@ class CameraPreviewsViewModel : ViewModel() {
     private val _uiState = MutableStateFlow<PreviewsUiState>(PreviewsUiState.Loading)
     val uiState: StateFlow<PreviewsUiState> = _uiState.asStateFlow()
 
-    // Bounding Box for NE Netherlands / Wadden (Adjust these to fit your map image exactly)
-    private val mapMinLat = 52.3402
-    private val mapMaxLat = 53.7020
-    private val mapMinLon = 5.1717
-    private val mapMaxLon = 7.1472
+    // -------------------------------------------------------------------------
+    // CALIBRATED MAP COORDINATES (STRICT SOURCE OF TRUTH)
+    // -------------------------------------------------------------------------
+    private val mapMinLat = 52.337052
+    private val mapMaxLat = 53.704927
+    private val mapMinLon = 5.162734
+    private val mapMaxLon = 7.150858
+    // -------------------------------------------------------------------------
 
     init {
         startPolling()
@@ -154,13 +170,13 @@ class CameraPreviewsViewModel : ViewModel() {
                         val previewsDeferred = async { api.getPreviewsStatus() }
 
                         val members = membersDeferred.await()
-                        val nomarch = nomarchDeferred.await()
+                        val nomarchResponse = nomarchDeferred.await()
                         val previews = previewsDeferred.await()
 
-                        // 1. Create base models and map Lat/Lon to X/Y percentages
                         val rawModels = members.map { member ->
                             val prefix = member.aka ?: member.name
-                            val deviceStatus = nomarch.find { it.deviceId == member.name }?.status ?: "Unknown"
+                            val nomarchDevice = nomarchResponse.devices.find { it.name == member.name }
+                            val deviceStatus = nomarchDevice?.piToServerStatus ?: "Unknown"
 
                             val latestFile = previews.files.find { it.filename == "$prefix.latest.jpg" }
                             val midnightFile = previews.files.find { it.filename == "$prefix.midnight.jpg" }
@@ -168,9 +184,7 @@ class CameraPreviewsViewModel : ViewModel() {
                             val latDouble = member.lat.toDoubleOrNull() ?: 0.0
                             val lonDouble = member.lon.toDoubleOrNull() ?: 0.0
 
-                            // Convert GPS to percentages (0f to 1f) for the map
                             val baseX = ((lonDouble - mapMinLon) / (mapMaxLon - mapMinLon)).toFloat().coerceIn(0f, 1f)
-                            // Invert Y because latitude goes up, but screen Y goes down
                             val baseY = (1.0 - ((latDouble - mapMinLat) / (mapMaxLat - mapMinLat))).toFloat().coerceIn(0f, 1f)
 
                             CameraUiModel(
@@ -186,9 +200,7 @@ class CameraPreviewsViewModel : ViewModel() {
                             )
                         }
 
-                        // 2. Solve overlaps (Cameras sharing the same coordinates)
-                        val scatteredModels = resolveOverlaps(rawModels)
-                        _uiState.value = PreviewsUiState.Success(scatteredModels)
+                        _uiState.value = PreviewsUiState.Success(groupOverlaps(rawModels))
                     }
                 } catch (e: Exception) {
                     if (_uiState.value !is PreviewsUiState.Success) {
@@ -200,49 +212,38 @@ class CameraPreviewsViewModel : ViewModel() {
         }
     }
 
-    // A simple scatter algorithm to prevent perfect overlaps
-    private fun resolveOverlaps(cameras: List<CameraUiModel>): List<CameraUiModel> {
-        val threshold = 0.02f // If points are within 2% of screen width/height
-        val grouped = cameras.groupBy {
-            // Group points by a rough grid to find neighbors
-            Pair((it.xPercent / threshold).toInt(), (it.yPercent / threshold).toInt())
-        }
+    private fun groupOverlaps(cameras: List<CameraUiModel>): List<CameraUiModel> {
+        val threshold = 0.005f
+        val result = cameras.toMutableList()
+        val visited = BooleanArray(cameras.size)
 
-        val result = mutableListOf<CameraUiModel>()
-        for ((_, group) in grouped) {
-            if (group.size == 1) {
-                result.add(group.first())
-            } else {
-                // If there are multiple in the same area, push them into a circle
-                val centerX = group.map { it.xPercent }.average().toFloat()
-                val centerY = group.map { it.yPercent }.average().toFloat()
-                val radius = 0.04f // 4% map distance offset
-
-                group.forEachIndexed { index, cam ->
-                    val angle = (2 * Math.PI * index) / group.size
-                    val offsetX = radius * cos(angle).toFloat()
-                    val offsetY = radius * sin(angle).toFloat()
-
-                    result.add(cam.copy(
-                        xPercent = (centerX + offsetX).coerceIn(0.02f, 0.98f),
-                        yPercent = (centerY + offsetY).coerceIn(0.02f, 0.98f)
-                    ))
+        for (i in cameras.indices) {
+            if (visited[i]) continue
+            val cluster = mutableListOf(i)
+            visited[i] = true
+            for (j in i + 1 until cameras.size) {
+                if (visited[j]) continue
+                val dx = cameras[i].xPercent - cameras[j].xPercent
+                val dy = cameras[i].yPercent - cameras[j].yPercent
+                if (dx * dx + dy * dy < threshold * threshold) {
+                    cluster.add(j)
+                    visited[j] = true
                 }
+            }
+            cluster.forEachIndexed { index, camIndex ->
+                result[camIndex] = result[camIndex].copy(clusterIndex = index, clusterCount = cluster.size)
             }
         }
         return result
     }
 
-    // Helper to format ISO dates
     private fun String.formatToReadableDate(): String {
         return try {
             val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
             val formatter = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
-            val date = parser.parse(this.substringBeforeLast(".")) // Strip milliseconds if present
+            val date = parser.parse(this.substringBeforeLast("."))
             date?.let { formatter.format(it) } ?: this
-        } catch (e: Exception) {
-            this
-        }
+        } catch (e: Exception) { this }
     }
 }
 
@@ -257,27 +258,18 @@ fun CameraPreviewsScreen(viewModel: CameraPreviewsViewModel = viewModel()) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         when (val state = uiState) {
-            is PreviewsUiState.Loading -> {
-                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-            }
-            is PreviewsUiState.Error -> {
-                Text("Error: ${state.message}", color = Color.Red, modifier = Modifier.align(Alignment.Center))
-            }
+            is PreviewsUiState.Loading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            is PreviewsUiState.Error -> Text("Error: ${state.message}", color = Color.Red, modifier = Modifier.align(Alignment.Center).padding(24.dp))
             is PreviewsUiState.Success -> {
-                InteractiveMapView(
-                    cameras = state.cameras,
-                    onCameraClick = { selectedCamera = it }
-                )
+                Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 24.dp)) {
+                    InteractiveMapView(cameras = state.cameras, onCameraClick = { selectedCamera = it })
+                }
             }
         }
     }
 
-    // Show the Polaroid Popup if a camera is selected
     selectedCamera?.let { camera ->
-        PolaroidDialog(
-            camera = camera,
-            onDismiss = { selectedCamera = null }
-        )
+        PolaroidDialog(camera = camera, onDismiss = { selectedCamera = null })
     }
 }
 
@@ -285,65 +277,66 @@ fun CameraPreviewsScreen(viewModel: CameraPreviewsViewModel = viewModel()) {
 fun InteractiveMapView(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel) -> Unit) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var hasAutoFit by remember { mutableStateOf(false) }
 
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF0A192F)) // Dark sea/sky background
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 5f)
-                    // Simple panning (can be improved with strict bounds later)
-                    offset += pan
-                }
-            }
+            .clip(RoundedCornerShape(16.dp))
+            .clipToBounds()
+            .border(2.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(16.dp))
+            .background(Color(0xFF0A192F)),
+        contentAlignment = Alignment.Center
     ) {
-        val mapWidth = constraints.maxWidth.toFloat()
-        val mapHeight = constraints.maxHeight.toFloat()
+        val cw = constraints.maxWidth.toFloat()
+        val ch = constraints.maxHeight.toFloat()
+        val mapAspect = 4f / 5f
+        val baseMapW = maxOf(cw, ch * mapAspect)
+        val baseMapH = baseMapW / mapAspect
 
-        // Map Layer (Graphics layer applies zoom and pan)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                // Use the lambda version of graphicsLayer for better performance with state variables
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                    translationX = offset.x
-                    translationY = offset.y
-                }
-        ) {
-            // 1. The Map Image
-            // TODO: Make sure you add 'nl_map_bg' to your res/drawable folder!
-            // If you don't have it right now, comment this Image out, and the dark blue Box will act as the sea.
-            Image(
-                painter = painterResource(id = R.drawable.nl_map_bg), // PLACEHOLDER! Replace with R.drawable.nl_map_bg
-                contentDescription = "Map of Netherlands",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-                alpha = 0.3f // Dim the map so markers show clearly
-            )
+        LaunchedEffect(cameras, cw, ch) {
+            if (!hasAutoFit && cameras.isNotEmpty() && cw > 0) {
+                val minX = cameras.minOf { it.xPercent }; val maxX = cameras.maxOf { it.xPercent }
+                val minY = cameras.minOf { it.yPercent }; val maxY = cameras.maxOf { it.yPercent }
+                val targetScale = (cw / ((maxX - minX) * baseMapW * 1.5f)).coerceIn(1f, 4f)
+                scale = targetScale
+                offset = Offset((0.5f - (minX + maxX)/2f) * baseMapW * scale, (0.5f - (minY + maxY)/2f) * baseMapH * scale)
+                hasAutoFit = true
+            }
+        }
 
-            // 2. The Markers Layer
-            cameras.forEach { camera ->
-                // Calculate absolute X,Y within the map Box
-                val absoluteX = camera.xPercent * mapWidth
-                val absoluteY = camera.yPercent * mapHeight
+        Box(modifier = Modifier.fillMaxSize().pointerInput(cw, ch) {
+            detectTransformGestures { _, pan, zoom, _ ->
+                val newScale = (scale * zoom).coerceIn(1f, 5f)
+                val maxX = maxOf(0f, (baseMapW * newScale - cw) / 2f)
+                val maxY = maxOf(0f, (baseMapH * newScale - ch) / 2f)
+                scale = newScale
+                offset = Offset((offset.x + pan.x).coerceIn(-maxX, maxX), (offset.y + pan.y).coerceIn(-maxY, maxY))
+            }
+        }, contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier.requiredSize(with(LocalDensity.current) { baseMapW.toDp() }, with(LocalDensity.current) { baseMapH.toDp() })
+                    .graphicsLayer { scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y }
+            ) {
+                Image(painter = painterResource(id = R.drawable.nl_map_bg), contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
 
-                Box(
-                    modifier = Modifier
-                        .offset { IntOffset(absoluteX.toInt(), absoluteY.toInt()) }
-                        // The tricky part: we need to center the marker over the exact coordinate.
-                        // We also apply an INVERSE scale so the markers don't get massive when you zoom in on the map!
-                        // Using the lambda version here gives us access to `.toPx()` automatically!
-                        .graphicsLayer {
-                            translationX = -24.dp.toPx() // offset by half the marker width (assume 48dp total width)
-                            translationY = -24.dp.toPx()
-                            scaleX = 1f / scale
-                            scaleY = 1f / scale
-                        }
-                ) {
-                    MapThumbnailMarker(camera = camera, onClick = { onCameraClick(camera) })
+                cameras.forEach { camera ->
+                    val scatterRadius = with(LocalDensity.current) { 48.dp.toPx() }
+                    val zoomFactor = (1f - (scale - 1f) / 4f).coerceIn(0f, 1f)
+
+                    val angle = (2 * Math.PI * camera.clusterIndex) / camera.clusterCount
+                    val clusterOffsetX = (scatterRadius * zoomFactor * cos(angle)).toFloat()
+                    val clusterOffsetY = (scatterRadius * zoomFactor * sin(angle)).toFloat()
+
+                    val absoluteX = (camera.xPercent * baseMapW) + (clusterOffsetX / scale)
+                    val absoluteY = (camera.yPercent * baseMapH) + (clusterOffsetY / scale)
+
+                    Box(
+                        modifier = Modifier.offset { IntOffset(absoluteX.toInt(), absoluteY.toInt()) }
+                            .graphicsLayer { translationX = -24.dp.toPx(); translationY = -24.dp.toPx(); scaleX = 1f/scale; scaleY = 1f/scale }
+                    ) {
+                        MapThumbnailMarker(camera = camera, onClick = { onCameraClick(camera) })
+                    }
                 }
             }
         }
@@ -354,150 +347,139 @@ fun InteractiveMapView(cameras: List<CameraUiModel>, onCameraClick: (CameraUiMod
 fun MapThumbnailMarker(camera: CameraUiModel, onClick: () -> Unit) {
     val baseUrl = "http://gifted-kirch.apsys.nl:8000/api/v1/previews/media"
     val thumbUrl = camera.latestTimestamp?.let { "$baseUrl/${camera.imagePrefix}.latest.jpg?ts=$it" }
+    val isWorking = camera.status.equals("complete", ignoreCase = true)
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable { onClick() }
-    ) {
-        // Thumbnail Box
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onClick() }) {
         Box(
-            modifier = Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .border(2.dp, if (camera.status.equals("online", true) || camera.status.equals("ok", true)) Color.Green else Color.Red, RoundedCornerShape(8.dp))
+            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+                .border(2.dp, if (isWorking) Color.Green else Color(0xFFFF9800), RoundedCornerShape(8.dp))
                 .background(Color.DarkGray),
             contentAlignment = Alignment.Center
         ) {
             if (thumbUrl != null) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(thumbUrl)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = "Thumbnail",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                AsyncImage(model = ImageRequest.Builder(LocalContext.current).data(thumbUrl).crossfade(true).build(),
+                    contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             } else {
-                // Missing image: Grey square with red No Photography icon
-                Icon(
-                    imageVector = Icons.Default.NoPhotography,
-                    contentDescription = "No Image",
-                    tint = Color.Red,
-                    modifier = Modifier.size(24.dp)
-                )
+                Icon(Icons.Default.NoPhotography, contentDescription = null, tint = Color.Red, modifier = Modifier.size(24.dp))
             }
         }
-
-        // Device Name underneath
-        Text(
-            text = camera.deviceId,
-            color = Color.White,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier
-                .background(Color(0xAA000000), RoundedCornerShape(4.dp))
-                .padding(horizontal = 4.dp, vertical = 2.dp)
-        )
+        Text(text = camera.deviceId.uppercase(), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 2.dp).background(Color(0xAA000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 2.dp))
     }
 }
 
 @Composable
 fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
     var showMidnight by remember { mutableStateOf(false) }
+    var polaroidScale by remember { mutableFloatStateOf(1f) }
+    var polaroidOffset by remember { mutableStateOf(Offset.Zero) }
 
     val baseUrl = "http://gifted-kirch.apsys.nl:8000/api/v1/previews/media"
-    val latestUrl =
-        camera.latestTimestamp?.let { "$baseUrl/${camera.imagePrefix}.latest.jpg?ts=$it" }
-    val midnightUrl =
-        camera.midnightTimestamp?.let { "$baseUrl/${camera.imagePrefix}.midnight.jpg?ts=$it" }
-
-    val currentUrl = if (showMidnight) midnightUrl else latestUrl
-    val currentDateStr = if (showMidnight) camera.midnightDateString else camera.latestDateString
+    val currentTimestamp = if (showMidnight) camera.midnightTimestamp else camera.latestTimestamp
+    val currentUrl = if (currentTimestamp != null) {
+        if (showMidnight) "$baseUrl/${camera.imagePrefix}.midnight.jpg?ts=$currentTimestamp"
+        else "$baseUrl/${camera.imagePrefix}.latest.jpg?ts=$currentTimestamp"
+    } else null
 
     Dialog(onDismissRequest = onDismiss) {
-        // Polaroid Frame
-        Card(
-            shape = RoundedCornerShape(4.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-                .shadow(16.dp, RoundedCornerShape(4.dp))
-        ) {
+        Card(shape = RoundedCornerShape(4.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
+            modifier = Modifier.fillMaxWidth().padding(16.dp).shadow(16.dp, RoundedCornerShape(4.dp))) {
             Column(
-                modifier = Modifier.padding(12.dp)
+                modifier = Modifier.padding(12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Image Area
-                Box(
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(300.dp)
+                        .aspectRatio(1f / 1f)
+                        .clipToBounds()
                         .background(Color.Black),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (currentUrl != null) {
-                        AsyncImage(
-                            model = ImageRequest.Builder(LocalContext.current)
-                                .data(currentUrl)
-                                .crossfade(true)
-                                .build(),
-                            contentDescription = "Large Camera View",
-                            contentScale = ContentScale.Fit, // Fit to preserve aspect ratio in polaroid
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                Icons.Default.NoPhotography,
-                                contentDescription = null,
-                                tint = Color.Red,
-                                modifier = Modifier.size(48.dp)
+                    val boxW = constraints.maxWidth.toFloat()
+                    val boxH = constraints.maxHeight.toFloat()
+
+                    Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val newScale = (polaroidScale * zoom).coerceIn(1f, 5f)
+
+                            // Dynamic clamping based on new aspect ratio
+                            val maxX = (boxW * (newScale - 1f))
+                            val maxY = (boxH * (newScale - 1f))
+
+                            polaroidScale = newScale
+                            polaroidOffset = Offset(
+                                (polaroidOffset.x + pan.x).coerceIn(-maxX, maxX),
+                                (polaroidOffset.y + pan.y).coerceIn(-maxY, maxY)
                             )
-                            Spacer(Modifier.height(8.dp))
-                            Text("No Image", color = Color.White)
+                        }
+                    }, contentAlignment = Alignment.Center) {
+                        if (currentUrl != null) {
+                            AsyncImage(model = ImageRequest.Builder(LocalContext.current).data(currentUrl).crossfade(true).build(),
+                                contentDescription = null, contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize().graphicsLayer {
+                                    scaleX = polaroidScale
+                                    scaleY = polaroidScale
+                                    translationX = polaroidOffset.x
+                                    translationY = polaroidOffset.y
+                                }
+                            )
+                        } else {
+                            // FALLBACK ICON FOR MISSING IMAGE
+                            Icon(
+                                imageVector = Icons.Default.NoPhotography,
+                                contentDescription = null,
+                                tint = Color.Gray,
+                                modifier = Modifier.size(64.dp)
+                            )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(Modifier.height(12.dp))
 
-                // Caption Area (Black text because Polaroid border is white)
-                Row(
+                // SINGLE COLUMN CAPTION AREA
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalAlignment = Alignment.Start
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = camera.deviceId,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 20.sp,
-                            color = Color.Black
-                        )
-                        Text(
-                            text = currentDateStr ?: "Unknown Date",
-                            color = Color.DarkGray,
-                            fontSize = 14.sp
-                        )
-                    }
+                    Text(
+                        text = camera.deviceId.uppercase(),
+                        fontFamily = BinkFamily,
+                        fontSize = 24.sp,
+                        color = Color.Black,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = if (showMidnight) camera.midnightDateString
+                            ?: "No Data" else camera.latestDateString ?: "No Data",
+                        color = Color.DarkGray,
+                        fontFamily = handWriting,
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center
+                    )
 
-                    // Toggle Button
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(text = "Midnight", fontSize = 12.sp, color = Color.DarkGray)
+                    Spacer(Modifier.height(0.dp))
+                }
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(bottom = 0.dp)
+                    ) {
+                        Text("Midnight", fontSize = 12.sp, color = Color.Gray)
                         Switch(
                             checked = !showMidnight,
                             onCheckedChange = { showMidnight = !it },
-                            modifier = Modifier.padding(horizontal = 8.dp),
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = MaterialTheme.colorScheme.primary,
-                                checkedTrackColor = MaterialTheme.colorScheme.primaryContainer,
-                                uncheckedThumbColor = Color.Gray,
-                                uncheckedTrackColor = Color.LightGray
-                            )
+                            modifier = Modifier.padding(horizontal = 8.dp).graphicsLayer {
+                                scaleX = 0.8f
+                                scaleY = 0.8f
+                            }
                         )
-                        Text(text = "Latest", fontSize = 12.sp, color = Color.DarkGray)
+                        Text("Latest", fontSize = 12.sp, color = Color.Gray)
                     }
                 }
             }

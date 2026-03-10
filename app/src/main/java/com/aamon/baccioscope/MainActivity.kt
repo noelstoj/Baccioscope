@@ -20,17 +20,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
-// Import our individual screen views
 import com.aamon.baccioscope.ui.screens.CameraPreviewsScreen
 import com.aamon.baccioscope.ui.screens.ConnectivityScreen
 import com.aamon.baccioscope.ui.screens.DataArchiveScreen
 import com.aamon.baccioscope.ui.screens.FleetStatusScreen
+import com.aamon.baccioscope.ui.theme.Typography
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            // Force a dark color scheme for the entire app
             MaterialTheme(
                 colorScheme = darkColorScheme(
                     background = Color(0xFF121212),
@@ -39,7 +38,9 @@ class MainActivity : ComponentActivity() {
                     onPrimary = Color.Black,
                     onBackground = Color.White,
                     onSurface = Color.White
-                )
+                ),
+                // CRITICAL: This connects the typography (and your font) to the app
+                typography = Typography
             ) {
                 BaccioscopeApp()
             }
@@ -50,16 +51,13 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun BaccioscopeApp() {
-    // State for the Night Vision Red Filter
     var isRedFilterEnabled by remember { mutableStateOf(false) }
 
-    // Setup the swipeable pager state
-    val pages = listOf("Cameras", "Status", "Archive", "Network")
+    val pages = listOf("Live", "Aamon", "Nomarch", "Wromgat")
     val pagerState = rememberPagerState(pageCount = { pages.size })
     val coroutineScope = rememberCoroutineScope()
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Main App Scaffold
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -67,7 +65,6 @@ fun BaccioscopeApp() {
                         Text("Baccioscope", fontWeight = FontWeight.Bold)
                     },
                     actions = {
-                        // Night Vision Toggle Button
                         IconButton(onClick = { isRedFilterEnabled = !isRedFilterEnabled }) {
                             Icon(
                                 imageVector = if (isRedFilterEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
@@ -88,8 +85,7 @@ fun BaccioscopeApp() {
                     .padding(paddingValues)
                     .background(MaterialTheme.colorScheme.background)
             ) {
-                // View Picker (Tabs that sync with the Pager)
-                PrimaryTabRow(
+                TabRow(
                     selectedTabIndex = pagerState.currentPage,
                     containerColor = MaterialTheme.colorScheme.surface,
                     contentColor = MaterialTheme.colorScheme.primary
@@ -107,7 +103,6 @@ fun BaccioscopeApp() {
                     }
                 }
 
-                // Swipeable Views Container
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize()
@@ -122,14 +117,11 @@ fun BaccioscopeApp() {
             }
         }
 
-        // The Red Filter Overlay
-        // Placed at the very root of the Box so it covers everything including the TopAppBar.
-        // It ignores touches automatically because it has no clickable modifier.
         if (isRedFilterEnabled) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0x55FF0000)) // Semi-transparent pure red
+                    .background(Color(0x55FF0000))
             )
         }
     }
