@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
 fun BaccioscopeApp() {
     var isRedFilterEnabled by remember { mutableStateOf(false) }
 
-    val pages = listOf("Live", "Aamon", "Nomarch", "Wromgat")
+    val pages = listOf("Live", "Aamon", "Nomarch", "Wormgat")
     val pagerState = rememberPagerState(pageCount = { pages.size })
     val coroutineScope = rememberCoroutineScope()
 

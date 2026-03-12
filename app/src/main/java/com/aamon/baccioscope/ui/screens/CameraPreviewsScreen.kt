@@ -5,12 +5,55 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.NoPhotography
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.PlayCircleOutline
+import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,16 +72,23 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
-import com.google.gson.annotations.SerializedName
 import com.aamon.baccioscope.R
 import com.aamon.baccioscope.ui.theme.BinkFamily
 import com.aamon.baccioscope.ui.theme.handWriting
+import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -51,7 +101,7 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -71,6 +121,7 @@ data class PreviewFile(
     @SerializedName("modified_timestamp") val modifiedTimestamp: Double,
     @SerializedName("modified_date") val modifiedDate: String,
     @SerializedName("is_image") val isImage: Boolean,
+    @SerializedName("is_video") val isVideo: Boolean = false,
     @SerializedName("download_url") val downloadUrl: String
 )
 
@@ -132,7 +183,9 @@ data class CameraUiModel(
     val xPercent: Float,
     val yPercent: Float,
     val clusterIndex: Int = 0,
-    val clusterCount: Int = 1
+    val clusterCount: Int = 1,
+    val videoUrl: String? = null,
+    val videoDate: String? = null
 )
 
 sealed class PreviewsUiState {
@@ -173,6 +226,8 @@ class CameraPreviewsViewModel : ViewModel() {
                         val nomarchResponse = nomarchDeferred.await()
                         val previews = previewsDeferred.await()
 
+                        val videos = previews.files.filter { it.isVideo }
+
                         val rawModels = members.map { member ->
                             val prefix = member.aka ?: member.name
                             val nomarchDevice = nomarchResponse.devices.find { it.name == member.name }
@@ -180,6 +235,10 @@ class CameraPreviewsViewModel : ViewModel() {
 
                             val latestFile = previews.files.find { it.filename == "$prefix.latest.jpg" }
                             val midnightFile = previews.files.find { it.filename == "$prefix.midnight.jpg" }
+
+                            val videoInfo = videos.firstOrNull { it.filename.startsWith(prefix, ignoreCase = true) }
+                            val videoUrl = videoInfo?.downloadUrl?.let { "http://gifted-kirch.apsys.nl:8000$it" }
+                            val videoDate = videoInfo?.modifiedDate?.formatToReadableDate()
 
                             val latDouble = member.lat.toDoubleOrNull() ?: 0.0
                             val lonDouble = member.lon.toDoubleOrNull() ?: 0.0
@@ -196,7 +255,9 @@ class CameraPreviewsViewModel : ViewModel() {
                                 midnightDateString = midnightFile?.modifiedDate?.formatToReadableDate(),
                                 imagePrefix = prefix,
                                 xPercent = baseX,
-                                yPercent = baseY
+                                yPercent = baseY,
+                                videoUrl = videoUrl,
+                                videoDate = videoDate
                             )
                         }
 
@@ -248,21 +309,47 @@ class CameraPreviewsViewModel : ViewModel() {
 }
 
 // ============================================================================
-// 3. COMPOSE UI
+// 3. UI ENUMS & STATE
+// ============================================================================
+
+enum class ViewMode { MAP, GRID, VIDEO_LIST }
+
+// ============================================================================
+// 4. MAIN SCREEN
 // ============================================================================
 
 @Composable
 fun CameraPreviewsScreen(viewModel: CameraPreviewsViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     var selectedCamera by remember { mutableStateOf<CameraUiModel?>(null) }
+    var viewMode by remember { mutableStateOf(ViewMode.MAP) }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        when (val state = uiState) {
-            is PreviewsUiState.Loading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-            is PreviewsUiState.Error -> Text("Error: ${state.message}", color = Color.Red, modifier = Modifier.align(Alignment.Center).padding(24.dp))
-            is PreviewsUiState.Success -> {
-                Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 24.dp)) {
-                    InteractiveMapView(cameras = state.cameras, onCameraClick = { selectedCamera = it })
+    Column(modifier = Modifier.fillMaxSize().background(Color(0xFF121212))) {
+        // View Switcher Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            SegmentedButtonRow(
+                currentMode = viewMode,
+                onModeSelected = { viewMode = it }
+            )
+        }
+
+        Box(modifier = Modifier.weight(1f)) {
+            when (val state = uiState) {
+                is PreviewsUiState.Loading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                is PreviewsUiState.Error -> Text("Error: ${state.message}", color = Color.Red, modifier = Modifier.align(Alignment.Center).padding(24.dp))
+                is PreviewsUiState.Success -> {
+                    Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 24.dp)) {
+                        when (viewMode) {
+                            ViewMode.MAP -> InteractiveMapView(cameras = state.cameras, onCameraClick = { selectedCamera = it })
+                            ViewMode.GRID -> GridLayout(cameras = state.cameras, onCameraClick = { selectedCamera = it })
+                            ViewMode.VIDEO_LIST -> VideoListLayout(cameras = state.cameras, onCameraClick = { selectedCamera = it })
+                        }
+                    }
                 }
             }
         }
@@ -272,6 +359,10 @@ fun CameraPreviewsScreen(viewModel: CameraPreviewsViewModel = viewModel()) {
         PolaroidDialog(camera = camera, onDismiss = { selectedCamera = null })
     }
 }
+
+// ============================================================================
+// 5. MAP LAYOUT (WITH ISOLATION-SORTED CLUSTERING)
+// ============================================================================
 
 @Composable
 fun InteractiveMapView(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel) -> Unit) {
@@ -362,15 +453,156 @@ fun MapThumbnailMarker(camera: CameraUiModel, onClick: () -> Unit) {
             } else {
                 Icon(Icons.Default.NoPhotography, contentDescription = null, tint = Color.Red, modifier = Modifier.size(24.dp))
             }
+
+            // Video indicator
+            if (camera.videoUrl != null) {
+                Icon(
+                    imageVector = Icons.Default.Movie,
+                    contentDescription = "Has Video",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(2.dp)
+                        .size(16.dp)
+                        .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                        .padding(2.dp)
+                )
+            }
         }
         Text(text = camera.deviceId.uppercase(), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(top = 2.dp).background(Color(0xAA000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 2.dp))
     }
 }
 
+// ============================================================================
+// 6. GRID LAYOUT
+// ============================================================================
+
+@Composable
+fun GridLayout(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel) -> Unit) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = 140.dp),
+        contentPadding = PaddingValues(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxSize()
+    ) {
+        items(cameras) { camera ->
+            val baseUrl = "http://gifted-kirch.apsys.nl:8000/api/v1/previews/media"
+            val thumbUrl = camera.latestTimestamp?.let { "$baseUrl/${camera.imagePrefix}.latest.jpg?ts=$it" }
+            val isWorking = camera.status.equals("complete", ignoreCase = true)
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clickable { onCameraClick(camera) },
+                shape = RoundedCornerShape(12.dp),
+                elevation = CardDefaults.cardElevation(4.dp)
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (thumbUrl != null) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current).data(thumbUrl).crossfade(true).build(),
+                            contentDescription = camera.deviceId,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Box(modifier = Modifier.fillMaxSize().background(Color.DarkGray), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.NoPhotography, contentDescription = null, tint = Color.Red, modifier = Modifier.size(40.dp))
+                        }
+                    }
+
+                    // Status indicator
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(if (isWorking) Color.Green else Color(0xFFFF9800))
+                    )
+                    // Video indicator
+                    if (camera.videoUrl != null) {
+                        Icon(
+                            imageVector = Icons.Default.Movie,
+                            contentDescription = "Has Video",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                                .size(24.dp)
+                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                .padding(4.dp)
+                        )
+                    }
+                    // Name label
+                    Text(
+                        text = camera.deviceId.uppercase(),
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(Color.Black.copy(alpha = 0.6f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 7. VIDEO LIST LAYOUT
+// ============================================================================
+
+@Composable
+fun VideoListLayout(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel) -> Unit) {
+    val camerasWithVideos = cameras.filter { it.videoUrl != null }
+
+    if (camerasWithVideos.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No videos currently available on the network.", color = Color.Gray)
+        }
+    } else {
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(camerasWithVideos) { camera ->
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable { onCameraClick(camera) },
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.PlayCircleOutline, contentDescription = null, modifier = Modifier.size(40.dp), tint = Color.Cyan)
+                        Spacer(Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(camera.deviceId.uppercase(), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text("Night Date: ${camera.videoDate ?: "Unknown"}", fontSize = 14.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 8. POLAROID / MEDIA DIALOG (IMAGE + INLINE EXOPLAYER)
+// ============================================================================
+
 @Composable
 fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
     var showMidnight by remember { mutableStateOf(false) }
+    var isVideoMode by remember { mutableStateOf(false) }
     var polaroidScale by remember { mutableFloatStateOf(1f) }
     var polaroidOffset by remember { mutableStateOf(Offset.Zero) }
 
@@ -381,9 +613,15 @@ fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
         else "$baseUrl/${camera.imagePrefix}.latest.jpg?ts=$currentTimestamp"
     } else null
 
-    Dialog(onDismissRequest = onDismiss) {
-        Card(shape = RoundedCornerShape(4.dp), colors = CardDefaults.cardColors(containerColor = Color.White),
-            modifier = Modifier.fillMaxWidth().padding(16.dp).shadow(16.dp, RoundedCornerShape(4.dp))) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            shape = RoundedCornerShape(4.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            modifier = Modifier.fillMaxWidth(0.95f).padding(16.dp).shadow(16.dp, RoundedCornerShape(4.dp))
+        ) {
             Column(
                 modifier = Modifier.padding(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -402,21 +640,33 @@ fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
                     Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
                         detectTransformGestures { _, pan, zoom, _ ->
                             val newScale = (polaroidScale * zoom).coerceIn(1f, 5f)
-
-                            // Dynamic clamping based on new aspect ratio
-                            val maxX = (boxW * (newScale - 1f))
-                            val maxY = (boxH * (newScale - 1f))
+                            val maxPanX = (boxW * (newScale - 1f)) / 2f
+                            val maxPanY = (boxH * (newScale - 1f)) / 2f
 
                             polaroidScale = newScale
                             polaroidOffset = Offset(
-                                (polaroidOffset.x + pan.x).coerceIn(-maxX, maxX),
-                                (polaroidOffset.y + pan.y).coerceIn(-maxY, maxY)
+                                (polaroidOffset.x + pan.x).coerceIn(-maxPanX, maxPanX),
+                                (polaroidOffset.y + pan.y).coerceIn(-maxPanY, maxPanY)
                             )
                         }
                     }, contentAlignment = Alignment.Center) {
-                        if (currentUrl != null) {
-                            AsyncImage(model = ImageRequest.Builder(LocalContext.current).data(currentUrl).crossfade(true).build(),
-                                contentDescription = null, contentScale = ContentScale.Crop,
+                        if (isVideoMode && camera.videoUrl != null) {
+                            ExoPlayerView(
+                                videoUrl = camera.videoUrl,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        scaleX = polaroidScale
+                                        scaleY = polaroidScale
+                                        translationX = polaroidOffset.x
+                                        translationY = polaroidOffset.y
+                                    }
+                            )
+                        } else if (currentUrl != null) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current).data(currentUrl).crossfade(true).build(),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize().graphicsLayer {
                                     scaleX = polaroidScale
                                     scaleY = polaroidScale
@@ -425,7 +675,6 @@ fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
                                 }
                             )
                         } else {
-                            // FALLBACK ICON FOR MISSING IMAGE
                             Icon(
                                 imageVector = Icons.Default.NoPhotography,
                                 contentDescription = null,
@@ -451,38 +700,125 @@ fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
                         textAlign = TextAlign.Center
                     )
                     Text(
-                        text = if (showMidnight) camera.midnightDateString
-                            ?: "No Data" else camera.latestDateString ?: "No Data",
+                        text = if (isVideoMode) "Video Night: ${camera.videoDate ?: "Unknown"}"
+                        else if (showMidnight) camera.midnightDateString ?: "No Data"
+                        else camera.latestDateString ?: "No Data",
                         color = Color.DarkGray,
                         fontFamily = handWriting,
                         fontSize = 14.sp,
                         textAlign = TextAlign.Center
                     )
-
-                    Spacer(Modifier.height(0.dp))
                 }
 
-                Column(
+                Spacer(Modifier.height(16.dp))
+
+                // Media Controls Footer
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.End
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(bottom = 0.dp)
-                    ) {
-                        Text("Midnight", fontSize = 12.sp, color = Color.Gray)
-                        Switch(
-                            checked = !showMidnight,
-                            onCheckedChange = { showMidnight = !it },
-                            modifier = Modifier.padding(horizontal = 8.dp).graphicsLayer {
-                                scaleX = 0.8f
-                                scaleY = 0.8f
-                            }
-                        )
-                        Text("Latest", fontSize = 12.sp, color = Color.Gray)
+                    if (camera.videoUrl != null) {
+                        Button(
+                            onClick = {
+                                isVideoMode = !isVideoMode
+                                polaroidScale = 1f
+                                polaroidOffset = Offset.Zero
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isVideoMode) Color.Cyan else Color(0xFF6200EA),
+                                contentColor = if (isVideoMode) Color.Black else Color.White
+                            )
+                        ) {
+                            Icon(if (isVideoMode) Icons.Default.Image else Icons.Default.Movie, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (isVideoMode) "Image" else "Video")
+                        }
+                    } else {
+                        Spacer(Modifier.width(8.dp)) // Maintain alignment if no video
+                    }
+
+                    if (!isVideoMode) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Midnight", fontSize = 12.sp, color = Color.Gray)
+                            Switch(
+                                checked = !showMidnight,
+                                onCheckedChange = { showMidnight = !it },
+                                modifier = Modifier.padding(horizontal = 8.dp).graphicsLayer {
+                                    scaleX = 0.8f
+                                    scaleY = 0.8f
+                                }
+                            )
+                            Text("Latest", fontSize = 12.sp, color = Color.Gray)
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@androidx.annotation.OptIn(UnstableApi::class)
+@Composable
+fun ExoPlayerView(videoUrl: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val exoPlayer = remember {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(videoUrl.toUri()))
+            prepare()
+            playWhenReady = true
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { exoPlayer.release() }
+    }
+
+    AndroidView(
+        factory = { ctx ->
+            PlayerView(ctx).apply {
+                player = exoPlayer
+                useController = true // Keeps default play/pause UI
+                layoutParams = android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+        },
+        modifier = modifier.background(Color.Black)
+    )
+}
+
+// ============================================================================
+// 9. HELPER: SEGMENTED BUTTON
+// ============================================================================
+
+@Composable
+fun SegmentedButtonRow(currentMode: ViewMode, onModeSelected: (ViewMode) -> Unit) {
+    Row(
+        modifier = Modifier
+            .background(Color.DarkGray, RoundedCornerShape(24.dp))
+            .padding(4.dp)
+    ) {
+        Segment(Icons.Default.Map, currentMode == ViewMode.MAP) { onModeSelected(ViewMode.MAP) }
+        Segment(Icons.Default.GridView, currentMode == ViewMode.GRID) { onModeSelected(ViewMode.GRID) }
+        Segment(Icons.Default.VideoLibrary, currentMode == ViewMode.VIDEO_LIST) { onModeSelected(ViewMode.VIDEO_LIST) }
+    }
+}
+
+@Composable
+fun Segment(icon: androidx.compose.ui.graphics.vector.ImageVector, isSelected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 24.dp, vertical = 10.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (isSelected) Color.White else Color.LightGray
+        )
     }
 }
