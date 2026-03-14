@@ -88,6 +88,7 @@ import coil.request.ImageRequest
 import com.aamon.baccioscope.R
 import com.aamon.baccioscope.ui.theme.BinkFamily
 import com.aamon.baccioscope.ui.theme.handWriting
+import com.aamon.baccioscope.ui.theme.deviceFont
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -102,8 +103,11 @@ import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 // ============================================================================
 // 1. DATA MODELS & NETWORK LAYER
@@ -182,8 +186,6 @@ data class CameraUiModel(
     val imagePrefix: String,
     val xPercent: Float,
     val yPercent: Float,
-    val clusterIndex: Int = 0,
-    val clusterCount: Int = 1,
     val videoUrl: String? = null,
     val videoDate: String? = null
 )
@@ -261,7 +263,7 @@ class CameraPreviewsViewModel : ViewModel() {
                             )
                         }
 
-                        _uiState.value = PreviewsUiState.Success(groupOverlaps(rawModels))
+                        _uiState.value = PreviewsUiState.Success(rawModels)
                     }
                 } catch (e: Exception) {
                     if (_uiState.value !is PreviewsUiState.Success) {
@@ -271,31 +273,6 @@ class CameraPreviewsViewModel : ViewModel() {
                 delay(30_000)
             }
         }
-    }
-
-    private fun groupOverlaps(cameras: List<CameraUiModel>): List<CameraUiModel> {
-        val threshold = 0.005f
-        val result = cameras.toMutableList()
-        val visited = BooleanArray(cameras.size)
-
-        for (i in cameras.indices) {
-            if (visited[i]) continue
-            val cluster = mutableListOf(i)
-            visited[i] = true
-            for (j in i + 1 until cameras.size) {
-                if (visited[j]) continue
-                val dx = cameras[i].xPercent - cameras[j].xPercent
-                val dy = cameras[i].yPercent - cameras[j].yPercent
-                if (dx * dx + dy * dy < threshold * threshold) {
-                    cluster.add(j)
-                    visited[j] = true
-                }
-            }
-            cluster.forEachIndexed { index, camIndex ->
-                result[camIndex] = result[camIndex].copy(clusterIndex = index, clusterCount = cluster.size)
-            }
-        }
-        return result
     }
 
     private fun String.formatToReadableDate(): String {
@@ -329,7 +306,7 @@ fun CameraPreviewsScreen(viewModel: CameraPreviewsViewModel = viewModel()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(8.dp),
             horizontalArrangement = Arrangement.Center
         ) {
             SegmentedButtonRow(
@@ -343,7 +320,7 @@ fun CameraPreviewsScreen(viewModel: CameraPreviewsViewModel = viewModel()) {
                 is PreviewsUiState.Loading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                 is PreviewsUiState.Error -> Text("Error: ${state.message}", color = Color.Red, modifier = Modifier.align(Alignment.Center).padding(24.dp))
                 is PreviewsUiState.Success -> {
-                    Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 24.dp)) {
+                    Box(modifier = Modifier.padding(horizontal = 12.dp, vertical = 0.dp)) {
                         when (viewMode) {
                             ViewMode.MAP -> InteractiveMapView(cameras = state.cameras, onCameraClick = { selectedCamera = it })
                             ViewMode.GRID -> GridLayout(cameras = state.cameras, onCameraClick = { selectedCamera = it })
@@ -411,22 +388,25 @@ fun InteractiveMapView(cameras: List<CameraUiModel>, onCameraClick: (CameraUiMod
             ) {
                 Image(painter = painterResource(id = R.drawable.nl_map_bg), contentDescription = null, contentScale = ContentScale.FillBounds, modifier = Modifier.fillMaxSize())
 
+                val clusterOffsets = remember(cameras, scale, offset, baseMapW, baseMapH) {
+                    calculatePetalOffsets(cameras, scale, offset, baseMapW, baseMapH)
+                }
+
                 cameras.forEach { camera ->
-                    val scatterRadius = with(LocalDensity.current) { 48.dp.toPx() }
-                    val zoomFactor = (1f - (scale - 1f) / 4f).coerceIn(0f, 1f)
+                    val petalingOffset = clusterOffsets[camera.deviceId]
 
-                    val angle = (2 * Math.PI * camera.clusterIndex) / camera.clusterCount
-                    val clusterOffsetX = (scatterRadius * zoomFactor * cos(angle)).toFloat()
-                    val clusterOffsetY = (scatterRadius * zoomFactor * sin(angle)).toFloat()
+                    // If it is null, that means the calculatePetalOffsets function culled it
+                    // for being outside the viewport. We skip rendering it completely.
+                    if (petalingOffset != null) {
+                        val absoluteX = (camera.xPercent + petalingOffset.x) * baseMapW
+                        val absoluteY = (camera.yPercent + petalingOffset.y) * baseMapH
 
-                    val absoluteX = (camera.xPercent * baseMapW) + (clusterOffsetX / scale)
-                    val absoluteY = (camera.yPercent * baseMapH) + (clusterOffsetY / scale)
-
-                    Box(
-                        modifier = Modifier.offset { IntOffset(absoluteX.toInt(), absoluteY.toInt()) }
-                            .graphicsLayer { translationX = -24.dp.toPx(); translationY = -24.dp.toPx(); scaleX = 1f/scale; scaleY = 1f/scale }
-                    ) {
-                        MapThumbnailMarker(camera = camera, onClick = { onCameraClick(camera) })
+                        Box(
+                            modifier = Modifier.offset { IntOffset(absoluteX.toInt(), absoluteY.toInt()) }
+                                .graphicsLayer { translationX = -24.dp.toPx(); translationY = -24.dp.toPx(); scaleX = 1f/scale; scaleY = 1f/scale }
+                        ) {
+                            MapThumbnailMarker(camera = camera, onClick = { onCameraClick(camera) })
+                        }
                     }
                 }
             }
@@ -440,11 +420,16 @@ fun MapThumbnailMarker(camera: CameraUiModel, onClick: () -> Unit) {
     val thumbUrl = camera.latestTimestamp?.let { "$baseUrl/${camera.imagePrefix}.latest.jpg?ts=$it" }
     val isWorking = camera.status.equals("complete", ignoreCase = true)
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable { onClick() }) {
+    // FIX: Removed `modifier = Modifier.clickable { onClick() }` from the Column
+    // so the text label below the image does not block clicks on markers underneath it.
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp))
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(8.dp))
                 .border(2.dp, if (isWorking) Color.Green else Color(0xFFFF9800), RoundedCornerShape(8.dp))
-                .background(Color.DarkGray),
+                .background(Color.DarkGray)
+                .clickable { onClick() }, // FIX: Moved clickable here, exclusively onto the image Box.
             contentAlignment = Alignment.Center
         ) {
             if (thumbUrl != null) {
@@ -454,22 +439,8 @@ fun MapThumbnailMarker(camera: CameraUiModel, onClick: () -> Unit) {
                 Icon(Icons.Default.NoPhotography, contentDescription = null, tint = Color.Red, modifier = Modifier.size(24.dp))
             }
 
-            // Video indicator
-            if (camera.videoUrl != null) {
-                Icon(
-                    imageVector = Icons.Default.Movie,
-                    contentDescription = "Has Video",
-                    tint = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(2.dp)
-                        .size(16.dp)
-                        .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                        .padding(2.dp)
-                )
-            }
         }
-        Text(text = camera.deviceId.uppercase(), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+        Text(text = camera.deviceId.uppercase(), color = Color.White, fontSize = 6.sp, fontWeight = FontWeight.Normal, fontFamily = deviceFont,
             modifier = Modifier.padding(top = 2.dp).background(Color(0xAA000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 2.dp))
     }
 }
@@ -481,7 +452,7 @@ fun MapThumbnailMarker(camera: CameraUiModel, onClick: () -> Unit) {
 @Composable
 fun GridLayout(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel) -> Unit) {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = 140.dp),
+        columns = GridCells.Adaptive(minSize = 100.dp),
         contentPadding = PaddingValues(8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -523,26 +494,13 @@ fun GridLayout(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel) -> U
                             .clip(CircleShape)
                             .background(if (isWorking) Color.Green else Color(0xFFFF9800))
                     )
-                    // Video indicator
-                    if (camera.videoUrl != null) {
-                        Icon(
-                            imageVector = Icons.Default.Movie,
-                            contentDescription = "Has Video",
-                            tint = Color.White,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(8.dp)
-                                .size(24.dp)
-                                .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                                .padding(4.dp)
-                        )
-                    }
                     // Name label
                     Text(
                         text = camera.deviceId.uppercase(),
                         color = Color.White,
-                        fontSize = 12.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
+                        fontFamily = deviceFont,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
@@ -585,7 +543,7 @@ fun VideoListLayout(cameras: List<CameraUiModel>, onCameraClick: (CameraUiModel)
                         Icon(Icons.Default.PlayCircleOutline, contentDescription = null, modifier = Modifier.size(40.dp), tint = Color.Cyan)
                         Spacer(Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(camera.deviceId.uppercase(), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                            Text(camera.deviceId.uppercase(),  fontFamily = deviceFont, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                             Text("Night Date: ${camera.videoDate ?: "Unknown"}", fontSize = 14.sp, color = Color.Gray)
                         }
                     }
@@ -731,11 +689,11 @@ fun PolaroidDialog(camera: CameraUiModel, onDismiss: () -> Unit) {
                             )
                         ) {
                             Icon(if (isVideoMode) Icons.Default.Image else Icons.Default.Movie, contentDescription = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text(if (isVideoMode) "Image" else "Video")
+                            //Spacer(Modifier.width(8.dp))
+                            //Text(if (isVideoMode) "Image" else "Video")
                         }
                     } else {
-                        Spacer(Modifier.width(8.dp)) // Maintain alignment if no video
+                        //Spacer(Modifier.width(8.dp)) // Maintain alignment if no video
                     }
 
                     if (!isVideoMode) {
@@ -821,4 +779,109 @@ fun Segment(icon: androidx.compose.ui.graphics.vector.ImageVector, isSelected: B
             tint = if (isSelected) Color.White else Color.LightGray
         )
     }
+}
+
+// ============================================================================
+// 10. MAP CLUSTERING CALCULATION (ISOLATION SORT + VIEWPORT CULLING)
+// ============================================================================
+
+/** * Calculates offsets for thumbnails so they "petal" around a shared coordinate
+ * based on the current zoom scale, preventing overlaps.
+ */
+fun calculatePetalOffsets(
+    cameras: List<CameraUiModel>,
+    scale: Float,
+    offset: Offset,
+    mapW: Float,
+    mapH: Float
+): Map<String, Offset> {
+    val offsets = mutableMapOf<String, Offset>()
+    if (mapW == 0f || mapH == 0f || cameras.isEmpty()) return offsets
+
+    // 1. Viewport Culling: Ignore devices outside the view window
+    // Calculate the relative map bounds currently visible on screen.
+    // Padding ensures devices don't pop out right at the border edge.
+    val paddingX = 150f / mapW / scale
+    val paddingY = 150f / mapH / scale
+
+    val relXMin = 0.5f + (-0.5f - offset.x / mapW) / scale - paddingX
+    val relXMax = 0.5f + ( 0.5f - offset.x / mapW) / scale + paddingX
+    val relYMin = 0.5f + (-0.5f - offset.y / mapH) / scale - paddingY
+    val relYMax = 0.5f + ( 0.5f - offset.y / mapH) / scale + paddingY
+
+    val visibleCameras = cameras.filter {
+        it.xPercent in relXMin..relXMax && it.yPercent in relYMin..relYMax
+    }
+
+    if (visibleCameras.isEmpty()) return offsets
+
+    // 2. Isolation Sorting: Calculate "Average Distance"
+    // We calculate this against ALL cameras to keep their isolation rank
+    // completely stable even when panning the map.
+    val isolationScores = visibleCameras.associateWith { cam ->
+        cameras.map { other ->
+            sqrt((cam.xPercent - other.xPercent).toDouble().pow(2.0) +
+                    (cam.yPercent - other.yPercent).toDouble().pow(2.0))
+        }.average()
+    }
+
+    // Sort descending: most isolated (highest average distance) first
+    val sortedCameras = visibleCameras.sortedByDescending { isolationScores[it] }
+
+    // 3. Greedy Clustering
+    val markerSizePx = 150f
+    val threshold = (markerSizePx * 2.0f) / scale
+
+    val clusters = mutableListOf<MutableList<CameraUiModel>>()
+    for (camera in sortedCameras) {
+        val pxX = camera.xPercent * mapW
+        val pxY = camera.yPercent * mapH
+
+        var added = false
+        for (cluster in clusters) {
+            val centerCam = cluster.first()
+            val cx = centerCam.xPercent * mapW
+            val cy = centerCam.yPercent * mapH
+
+            val dist = sqrt((pxX - cx).toDouble().pow(2.0) + (pxY - cy).toDouble().pow(2.0)).toFloat()
+            if (dist < threshold) {
+                cluster.add(camera)
+                added = true
+                break
+            }
+        }
+        if (!added) {
+            clusters.add(mutableListOf(camera))
+        }
+    }
+
+    // 4. Apply Petaling Offsets (Satellites orbit the anchor)
+    for (cluster in clusters) {
+        // The first camera in the cluster is the most isolated. It anchors the cluster.
+        val centerCam = cluster.first()
+        offsets[centerCam.deviceId] = Offset(0f, 0f)
+
+        if (cluster.size > 1) {
+            val radius = (markerSizePx * 1.2f) / scale
+
+            // The rest orbit around it
+            for (i in 1 until cluster.size) {
+                val camera = cluster[i]
+                // Distribute angles evenly among the remaining (N-1) cameras
+                val angle = (i - 1) * (2 * PI / (cluster.size - 1))
+                val dx = (radius * cos(angle)).toFloat()
+                val dy = (radius * sin(angle)).toFloat()
+
+                val relDx = dx / mapW
+                val relDy = dy / mapH
+
+                val finalRelX = centerCam.xPercent + relDx
+                val finalRelY = centerCam.yPercent + relDy
+
+                offsets[camera.deviceId] = Offset(finalRelX - camera.xPercent, finalRelY - camera.yPercent)
+            }
+        }
+    }
+
+    return offsets
 }

@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aamon.baccioscope.ui.theme.deviceFont
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -236,6 +237,7 @@ fun ArchiveDeviceCard(device: ArchiveDeviceStatus) {
                 Text(
                     text = device.name.uppercase(),
                     fontSize = 14.sp,
+                    fontFamily = deviceFont,
                     fontWeight = FontWeight.Bold
                 )
                 if (device.hasPreviousResiduals) {

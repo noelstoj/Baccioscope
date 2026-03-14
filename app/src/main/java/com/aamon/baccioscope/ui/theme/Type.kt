@@ -23,10 +23,14 @@ val BinkFamily = FontFamily(
 
 // SWAPPING TO "Caveat" - A KNOWN WORKING GOOGLE FONT
 val fontName = GoogleFont("Indie Flower")
-
 val handWriting = FontFamily(
     Font(googleFont = fontName, fontProvider = provider)
 )
+val deviceFont = FontFamily(
+    Font(googleFont = GoogleFont("Electrolize"), fontProvider = provider)
+)
+
+
 
 val Typography = Typography(
     bodyLarge = TextStyle(

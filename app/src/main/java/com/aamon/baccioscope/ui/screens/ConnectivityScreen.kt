@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aamon.baccioscope.ui.theme.deviceFont
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -81,7 +82,7 @@ class ConnectivityViewModel : ViewModel() {
                 try {
                     val data = ConnectivityRetrofit.api.getTunnels()
                     _tunnels.value = data
-                    _lastUpdated.value = "Updated just now"
+                    _lastUpdated.value = "Updated within last 10 seconds"
                 } catch (e: Exception) {
                     _lastUpdated.value = "Error: ${e.message}"
                 }
@@ -152,7 +153,7 @@ fun TunnelCard(tunnel: ConnectivityTunnel, onClick: () -> Unit) {
 
     Card(
         elevation = CardDefaults.cardElevation(6.dp),
-        colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
+        colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surface),
         shape = RoundedCornerShape(12.dp),
         onClick = onClick,
         modifier = Modifier.fillMaxWidth()
@@ -174,9 +175,10 @@ fun TunnelCard(tunnel: ConnectivityTunnel, onClick: () -> Unit) {
 
             Column {
                 Text(
-                    text = tunnel.name,
+                    text = tunnel.name.uppercase(),
                     fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp,
+                    fontFamily = deviceFont,
+                    fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
